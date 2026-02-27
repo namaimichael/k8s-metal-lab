@@ -64,7 +64,7 @@ Cleanly release MAAS nodes, destroy Terraform state, and power down hypervisor V
 make clean
 ```
 
-## 🧠 Engineering Objectives
+## Engineering Objectives
 This environment was developed to provide a reproducible, production-like bare-metal lab for testing infrastructure changes, GitOps workflows, and storage configurations before they are deployed to physical data centers.
 
 By treating local VMs as raw MAC addresses through MAAS, this pipeline forces strict adherence to IaC principles and eliminates reliance on "cloud provider magic buttons"—ensuring our platform engineering practices are robust, portable, and fully declarative.
