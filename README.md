@@ -8,7 +8,7 @@
 
 A fully automated, zero-touch pipeline that provisions a production-ready Kubernetes cluster from "bare metal" (macOS UTM VMs) to a fully managed GitOps state using a single command: `make all`.
 
-## 🏗️ Architecture & Tech Stack
+## Architecture & Tech Stack
 
 This project bridges the gap between local development constraints and enterprise production standards. It utilizes a highly decoupled, multi-stage pipeline to simulate a physical data center environment:
 
@@ -22,7 +22,7 @@ This project bridges the gap between local development constraints and enterpris
 * **Certificate Management:** Cert-Manager (Let's Encrypt DNS-01 via DuckDNS)
 * **Fleet Management:** Spectro Cloud Palette Integration
 
-## ⚙️ The Zero-Touch Pipeline
+## The Zero-Touch Pipeline
 
 The deployment is orchestrated via a monolithic `Makefile` that handles state transitions across four distinct phases:
 
@@ -43,7 +43,7 @@ Once MAAS reports all nodes as `Ready`, **Terraform** takes over to allocate the
 ### Phase 4: The GitOps Handover
 Ansible securely injects API credentials into Kubernetes Secrets, installs **ArgoCD**, and applies a declarative "App-of-Apps" root manifest. Ansible then retires, and ArgoCD takes continuous control of the cluster state, deploying Longhorn, Cert-Manager, and enterprise agents.
 
-## 🚀 Usage
+## Usage
 
 ### Prerequisites
 * macOS (Apple Silicon) with [UTM](https://mac.getutm.app/) installed.
