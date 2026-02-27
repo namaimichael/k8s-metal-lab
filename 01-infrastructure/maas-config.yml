@@ -1,0 +1,124 @@
+---
+- name: Configure MAAS Internals
+  hosts: maas
+  become: true
+  vars:
+    maas_admin: "admin"
+    subnet_cidr: "192.168.65.0/24"
+    dhcp_start: "192.168.65.150"
+    dhcp_end: "192.168.65.200"
+
+  tasks:
+    - name: Fix MAAS GPG Keyring (Signature Error Fix)
+      shell: |
+        gpg --homedir /var/lib/maas/.gnupg --keyserver keyserver.ubuntu.com --recv-keys 473041FA
+        gpg --homedir /var/lib/maas/.gnupg --export 473041FA | tee /usr/share/keyrings/maas-official-keyring.gpg > /dev/null
+        systemctl restart maas-regiond maas-rackd
+      changed_when: true
+
+    - name: Wait for MAAS API to return 200 OK
+      uri:
+        url: "http://localhost:5240/MAAS/api/2.0/version/"
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 10
+      delay: 10
+
+    - name: Login to MAAS CLI
+      shell: |
+        API_KEY=$(sudo maas apikey --username {{ maas_admin }})
+        maas login admin http://localhost:5240/MAAS "$API_KEY"
+      changed_when: false
+
+    - name: Import Ubuntu 24.04 LTS Images
+      shell: maas {{ maas_admin }} boot-resources import
+      changed_when: true
+
+    - name: Configure Subnet and Gateway
+      shell: |
+        EXISTS=$(maas admin subnets read | jq -r '.[] | select(.cidr=="{{ subnet_cidr }}") | .id')
+        if [ -z "$EXISTS" ]; then
+          maas admin subnets create cidr={{ subnet_cidr }} name=k8s-subnet gateway_ip=192.168.65.1 dns_servers=192.168.65.2 fabric=fabric-0 vid=0
+        else
+          maas admin subnet update {{ subnet_cidr }} gateway_ip=192.168.65.1 dns_servers=192.168.65.2 name=k8s-subnet
+        fi
+      changed_when: true
+
+    - name: Get Subnet ID
+      shell: |
+        maas admin subnets read | jq -r '.[] | select(.cidr=="{{ subnet_cidr }}") | .id'
+      register: subnet_id
+      changed_when: false
+
+    - name: Debug subnet ID
+      debug:
+        msg: "Subnet ID is: {{ subnet_id.stdout }}"
+
+    - name: Delete any existing dynamic IP ranges on this subnet
+      shell: |
+        # Find and delete all existing dynamic ranges to avoid conflicts
+        maas admin ipranges read | \
+          jq -r '.[] | select(.type=="dynamic") | select(.subnet.cidr=="{{ subnet_cidr }}") | .id' | \
+          xargs -r -I{} maas admin iprange delete {}
+      changed_when: true
+      # It's fine if there's nothing to delete
+      failed_when: false
+
+    - name: Create Dynamic DHCP Range
+      shell: |
+        maas admin ipranges create \
+          type=dynamic \
+          subnet={{ subnet_id.stdout }} \
+          start_ip={{ dhcp_start }} \
+          end_ip={{ dhcp_end }}
+      register: range_create
+      changed_when: true
+
+    - name: Debug range creation result
+      debug:
+        msg: "{{ range_create.stdout }}"
+
+    - name: Wait for MAAS to index the new range
+      pause:
+        seconds: 10
+
+    - name: Enable DHCP on VLAN 0
+      shell: |
+        RACK_ID=$(maas admin rack-controllers read | jq -r '.[0].system_id')
+        maas admin vlan update 0 0 dhcp_on=true primary_rack="$RACK_ID"
+      changed_when: true
+
+    - name: Set MAAS API URL for Enlistment
+      shell: |
+        sudo maas config --maas-url "http://192.168.65.2:5240/MAAS"
+        sudo systemctl restart maas-regiond maas-rackd
+      changed_when: true
+
+    - name: Wait for MAAS services to come back up
+      uri:
+        url: "http://localhost:5240/MAAS/api/2.0/version/"
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 10
+      delay: 10
+
+    - name: Verify DHCP range was created correctly
+      shell: |
+        maas admin ipranges read | \
+          jq -r '.[] | select(.type=="dynamic") | {id, type, start_ip, end_ip, subnet_cidr: .subnet.cidr}'
+      register: ranges_check
+      changed_when: false
+
+    - name: Debug final IP ranges
+      debug:
+        msg: "{{ ranges_check.stdout }}"
+
+    - name: Wait for boot resources to finish downloading (Crucial for PXE)
+      shell: maas admin boot-resources is-importing
+      register: importing
+      until: importing.stdout == "false"
+      retries: 60
+      delay: 15
+      changed_when: false

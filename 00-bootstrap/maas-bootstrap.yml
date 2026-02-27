@@ -1,0 +1,80 @@
+---
+- name: Bootstrap MAAS Controller
+  hosts: maas_controller
+  become: yes
+  vars:
+    maas_admin_user: admin
+    maas_admin_pass: admin
+    maas_admin_email: admin@lab.local
+    maas_ip: "192.168.65.2"
+
+  tasks:
+    - name: Wait for apt to unlock
+      shell: while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done;
+      changed_when: false
+
+    - name: Ensure software-properties-common is installed
+      apt:
+        name: software-properties-common
+        state: present
+        update_cache: yes
+
+    - name: Add official MAAS PPA (3.7)
+      apt_repository:
+        repo: ppa:maas/3.7
+        state: present
+
+    - name: Update apt cache and install MAAS
+      apt:
+        name: 
+          - maas
+          - postgresql
+        state: present
+        update_cache: yes
+
+    - name: Check if MAAS is already initialized
+      stat:
+        path: /var/lib/maas/secret
+      register: maas_secret
+
+    - name: Initialize MAAS region and rack controllers
+      command: maas init region+rack --maas-url http://{{ maas_ip }}:5240/MAAS
+      when: not maas_secret.stat.exists
+
+    - name: Check if MAAS admin user exists
+      command: maas-region shell -c "from django.contrib.auth.models import User; print(User.objects.filter(username='{{ maas_admin_user }}').exists())"
+      register: admin_exists
+      changed_when: false
+
+    - name: Create MAAS admin user
+      command: maas createadmin --username {{ maas_admin_user }} --password {{ maas_admin_pass }} --email {{ maas_admin_email }}
+      when: "'False' in admin_exists.stdout"
+
+    - name: Generate MAAS API key
+      command: maas apikey --username {{ maas_admin_user }}
+      register: api_key_output
+      changed_when: false
+
+    - name: Save API key to local .env file for Terraform
+      copy:
+        content: |
+          TF_VAR_maas_api_key="{{ api_key_output.stdout }}"
+          TF_VAR_maas_url="http://{{ maas_ip }}:5240/MAAS"
+        dest: "../.env"
+      delegate_to: localhost
+      become: no
+
+    - name: Log into MAAS CLI locally
+      command: maas login {{ maas_admin_user }} http://127.0.0.1:5240/MAAS {{ api_key_output.stdout }}
+      changed_when: false
+
+    - name: Bypass MAAS Global Web UI Wizard via CLI
+      command: maas {{ maas_admin_user }} maas set-config name=completed_intro value=true
+      changed_when: false
+
+    - name: Bypass MAAS User-Specific SSH UI Wizard
+      command: >
+        sudo -u postgres psql -d maasdb -c
+        "UPDATE maasserver_userprofile SET completed_intro = 't' WHERE user_id = (SELECT id FROM auth_user WHERE username = '{{ maas_admin_user }}');"
+      changed_when: false
+

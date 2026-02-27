@@ -1,0 +1,73 @@
+
+- name: Release MAAS nodes back to Ready state
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    maas_url: "{{ lookup('env', 'TF_VAR_maas_url') }}"
+    maas_api_key: "{{ lookup('env', 'MAAS_API_KEY') }}"
+    node_hostnames:
+      - k8s-master-1
+      - k8s-worker-1
+      - k8s-worker-2
+    ready_poll_retries: 30
+    ready_poll_delay: 10
+
+  tasks:
+
+    - name: Get machine info for each node
+      ansible.builtin.uri:
+        url: "{{ maas_url }}/api/2.0/machines/?hostname={{ item }}"
+        method: GET
+        headers:
+          Authorization: "{{ maas_api_key }}"
+        return_content: true
+      loop: "{{ node_hostnames }}"
+      register: machine_info
+
+    - name: Build system_id map
+      ansible.builtin.set_fact:
+        system_ids: >-
+          {{
+            system_ids | default({}) | combine({
+              item.json[0].hostname: item.json[0].system_id
+            })
+          }}
+      loop: "{{ machine_info.results }}"
+      when: item.json | length > 0
+
+    - name: Show resolved system IDs
+      ansible.builtin.debug:
+        msg: "{{ system_ids }}"
+
+    - name: Release each node
+      ansible.builtin.uri:
+        url: "{{ maas_url }}/api/2.0/machines/{{ item.value }}/op-release/"
+        method: POST
+        headers:
+          Authorization: "{{ maas_api_key }}"
+        status_code: [200, 409]
+      loop: "{{ system_ids | dict2items }}"
+      register: release_results
+
+    - name: Wait for each node to reach Ready state
+      ansible.builtin.uri:
+        url: "{{ maas_url }}/api/2.0/machines/{{ item.value }}/"
+        method: GET
+        headers:
+          Authorization: "{{ maas_api_key }}"
+        return_content: true
+      loop: "{{ system_ids | dict2items }}"
+      register: status_check
+      until: status_check.json.status_name == "Ready"
+      retries: "{{ ready_poll_retries }}"
+      delay: "{{ ready_poll_delay }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Confirm all nodes are Ready
+      ansible.builtin.debug:
+        msg: "{{ item.json.hostname }} is {{ item.json.status_name }}"
+      loop: "{{ status_check.results }}"
+      loop_control:
+        label: "{{ item.json.hostname }}"

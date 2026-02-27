@@ -1,0 +1,26 @@
+---
+- name: Clean MAAS Controller Configuration
+  hosts: maas
+  become: true
+  vars:
+    maas_admin: "admin"
+
+  tasks:
+    - name: Login to MAAS CLI (Local context on the VM)
+      shell: |
+        API_KEY=$(sudo maas apikey --username {{ maas_admin }})
+        # We name the profile 'admin' for consistency
+        maas login admin http://localhost:5240/MAAS "$API_KEY"
+      changed_when: false
+
+    - name: Remove Existing IP Ranges
+      shell: |
+        for id in $(maas admin ipranges read | jq -r '.[].id'); do
+          maas admin iprange delete $id
+        done
+      failed_when: false # Ignore if no ranges exist
+
+    - name: Disable DHCP on VLAN 0
+      shell: |
+        maas admin vlan update 0 0 dhcp_on=false
+      failed_when: false

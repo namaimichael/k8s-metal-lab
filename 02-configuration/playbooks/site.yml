@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# Kubernetes Cluster Bootstrap
+# Stack: Kubernetes 1.30, containerd, Calico CNI
+# Addons: MetalLB, Ingress-NGINX, Metrics Server
+# =============================================================================
+
+- name: Common system preparation
+  hosts: k8s_cluster
+  become: true
+  gather_facts: true
+  roles:
+    - common
+    - containerd
+    - kubernetes
+
+- name: Bootstrap control plane
+  hosts: control_plane
+  become: true
+  gather_facts: true
+  roles:
+    - control-plane
+
+- name: Join workers to cluster
+  hosts: workers
+  become: true
+  gather_facts: true
+  roles:
+    - worker
+
+- name: Install cluster addons
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  roles:
+    - addons

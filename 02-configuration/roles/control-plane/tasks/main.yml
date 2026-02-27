@@ -1,0 +1,88 @@
+---
+# =============================================================================
+# control-plane — kubeadm init + Calico CNI
+# =============================================================================
+
+- name: Check if cluster is already initialised
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_init_done
+
+- name: Copy kubeadm config
+  template:
+    src: kubeadm-config.yml.j2
+    dest: /tmp/kubeadm-config.yml
+    mode: '0644'
+
+- name: Initialise the control plane
+  command: kubeadm init --config /tmp/kubeadm-config.yml --upload-certs
+  when: not kubeadm_init_done.stat.exists
+  register: kubeadm_init_output
+
+- name: Create .kube directory for root
+  file:
+    path: /root/.kube
+    state: directory
+    mode: '0700'
+
+- name: Copy admin.conf to root .kube/config
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: true
+    mode: '0600'
+
+- name: Create .kube directory for ubuntu user
+  file:
+    path: /home/ubuntu/.kube
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0700'
+
+- name: Copy admin.conf to ubuntu user
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/ubuntu/.kube/config
+    remote_src: true
+    owner: ubuntu
+    group: ubuntu
+    mode: '0600'
+
+- name: Install Calico CNI
+  command: >
+    kubectl apply -f
+    https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/calico.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: calico_install
+  changed_when: "'created' in calico_install.stdout or 'configured' in calico_install.stdout"
+
+- name: Wait for Calico pods to be ready
+  command: >
+    kubectl wait --for=condition=ready pod
+    -l k8s-app=calico-node
+    -n kube-system
+    --timeout=120s
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  retries: 5
+  delay: 15
+  register: calico_ready
+  until: calico_ready.rc == 0
+
+- name: Generate worker join command
+  command: kubeadm token create --print-join-command
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: join_command
+  changed_when: false
+
+- name: Store join command as fact for workers
+  set_fact:
+    k8s_join_command: "{{ join_command.stdout }}"
+
+- name: Share join command with all hosts
+  add_host:
+    name: "k8s_join_holder"
+    k8s_join_command: "{{ join_command.stdout }}"

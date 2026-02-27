@@ -1,0 +1,84 @@
+---
+- name: Automate MAAS Node Provisioning
+  hosts: maas
+  become: false
+  gather_facts: false
+  vars:
+    maas_admin: "admin"
+
+  tasks:
+    - name: Wait for MAAS controller SSH to become reachable
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+        sleep: 5
+
+    - name: Gather facts (Now that SSH is up)
+      ansible.builtin.setup:
+
+    - name: Get API Key
+      shell: sudo maas apikey --username {{ maas_admin }}
+      register: maas_api_key
+      changed_when: false
+
+    - name: Login to MAAS
+      shell: maas login {{ maas_admin }} http://localhost:5240/MAAS "{{ maas_api_key.stdout }}"
+      changed_when: false
+
+    - name: Delete stale ghost nodes beyond worker-2
+      shell: |
+        maas {{ maas_admin }} machines read | \
+        jq -r '.[] | select(.hostname | test("^k8s-worker-[3-9]$|^k8s-worker-[0-9]{2,}$")) | .system_id' | \
+        xargs -r -I{} maas {{ maas_admin }} machine delete {}
+      changed_when: true
+      failed_when: false
+
+    - name: Wait for MAAS to settle after deletions
+      pause:
+        seconds: 5
+
+    - name: Set Power Type, Rename, and Commission Nodes
+      shell: |
+        set -euo pipefail
+
+        # Accept New, Failed commissioning, or Ready nodes
+        MACHINES=$(maas {{ maas_admin }} machines read | jq -r '
+          .[] | select(
+            .status_name == "New" or
+            .status_name == "Failed commissioning" or
+            .status_name == "Ready"
+          ) | .system_id')
+
+        if [ -z "$MACHINES" ]; then
+          echo "ERROR: No eligible nodes found in MAAS (expected New, Failed, or Ready)."
+          maas {{ maas_admin }} machines read | jq -r '.[] | "\(.hostname): \(.status_name)"'
+          exit 1
+        fi
+
+        COUNT=0
+        for id in $MACHINES; do
+          COUNT=$((COUNT+1))
+          [ $COUNT -eq 1 ] && NEW_NAME="k8s-master-1"
+          [ $COUNT -eq 2 ] && NEW_NAME="k8s-worker-1"
+          [ $COUNT -eq 3 ] && NEW_NAME="k8s-worker-2"
+
+          CURRENT_STATUS=$(maas {{ maas_admin }} machine read $id | jq -r '.status_name')
+          echo "Processing $NEW_NAME (SystemID: $id, Status: $CURRENT_STATUS)..."
+
+          # Update power type and hostname
+          maas {{ maas_admin }} machine update $id power_type=manual hostname=$NEW_NAME
+
+          # Only commission if not already Ready
+          if [ "$CURRENT_STATUS" != "Ready" ]; then
+            echo "  -> Commissioning $NEW_NAME..."
+            maas {{ maas_admin }} machine commission $id \
+              enable_ssh=0 \
+              skip_bmc_config=1 \
+              testing_scripts=none
+          else
+            echo "  -> $NEW_NAME already Ready — skipping commissioning."
+          fi
+        done
+      args:
+        executable: /bin/bash
+      changed_when: true

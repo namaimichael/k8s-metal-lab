@@ -1,0 +1,150 @@
+---
+# =============================================================================
+# addons — MetalLB, Ingress-NGINX, Metrics Server
+# =============================================================================
+
+- name: Set KUBECONFIG env fact
+  set_fact:
+    kubeconfig: /etc/kubernetes/admin.conf
+
+# ---------------------------------------------------------------------------
+# MetalLB
+# ---------------------------------------------------------------------------
+
+- name: Install MetalLB
+  command: >
+    kubectl apply -f
+    https://raw.githubusercontent.com/metallb/metallb/v0.14.5/config/manifests/metallb-native.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: metallb_install
+  changed_when: "'created' in metallb_install.stdout or 'configured' in metallb_install.stdout"
+
+- name: Wait for MetalLB controller to be ready
+  command: >
+    kubectl wait --for=condition=ready pod
+    -l component=controller
+    -n metallb-system
+    --timeout=120s
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  retries: 5
+  delay: 15
+  register: metallb_ready
+  until: metallb_ready.rc == 0
+
+- name: Wait for MetalLB webhook to be ready
+  command: >
+    kubectl wait --for=condition=ready pod
+    -l component=speaker
+    -n metallb-system
+    --timeout=120s
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  retries: 5
+  delay: 10
+  register: metallb_speaker_ready
+  until: metallb_speaker_ready.rc == 0
+
+- name: Apply MetalLB IP pool config
+  template:
+    src: metallb-pool.yml.j2
+    dest: /tmp/metallb-pool.yml
+    mode: '0644'
+
+- name: Create MetalLB IP address pool
+  command: kubectl apply -f /tmp/metallb-pool.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: metallb_pool
+  changed_when: "'created' in metallb_pool.stdout or 'configured' in metallb_pool.stdout"
+
+# ---------------------------------------------------------------------------
+# Ingress-NGINX
+# ---------------------------------------------------------------------------
+
+- name: Install Ingress-NGINX
+  command: >
+    kubectl apply -f
+    https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/cloud/deploy.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: ingress_install
+  changed_when: "'created' in ingress_install.stdout or 'configured' in ingress_install.stdout"
+
+- name: Wait for Ingress-NGINX controller to be ready
+  command: >
+    kubectl wait --for=condition=ready pod
+    -l app.kubernetes.io/component=controller
+    -n ingress-nginx
+    --timeout=180s
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  retries: 5
+  delay: 20
+  register: ingress_ready
+  until: ingress_ready.rc == 0
+
+# ---------------------------------------------------------------------------
+# Metrics Server
+# ---------------------------------------------------------------------------
+
+- name: Install Metrics Server
+  command: >
+    kubectl apply -f
+    https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: metrics_install
+  changed_when: "'created' in metrics_install.stdout or 'configured' in metrics_install.stdout"
+
+- name: Patch Metrics Server for insecure TLS (required in lab without valid certs)
+  command: >
+    kubectl patch deployment metrics-server
+    -n kube-system
+    --type=json
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: metrics_patch
+  changed_when: metrics_patch.rc == 0
+  failed_when: false
+
+- name: Wait for Metrics Server to be ready
+  command: >
+    kubectl wait --for=condition=ready pod
+    -l k8s-app=metrics-server
+    -n kube-system
+    --timeout=120s
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  retries: 5
+  delay: 15
+  register: metrics_ready
+  until: metrics_ready.rc == 0
+
+# ---------------------------------------------------------------------------
+# Final verification
+# ---------------------------------------------------------------------------
+
+- name: Get all nodes
+  command: kubectl get nodes -o wide
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: nodes_output
+  changed_when: false
+
+- name: Show cluster nodes
+  debug:
+    msg: "{{ nodes_output.stdout_lines }}"
+
+- name: Get all pods across all namespaces
+  command: kubectl get pods -A
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: pods_output
+  changed_when: false
+
+- name: Show all pods
+  debug:
+    msg: "{{ pods_output.stdout_lines }}"

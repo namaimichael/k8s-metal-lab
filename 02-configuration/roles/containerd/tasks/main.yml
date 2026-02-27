@@ -1,0 +1,66 @@
+---
+# =============================================================================
+# containerd — container runtime
+# =============================================================================
+
+- name: Add Docker GPG key (containerd is distributed via Docker repos)
+  shell: |
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+
+- name: Add Docker apt repository
+  apt_repository:
+    repo: >
+      deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.gpg]
+      https://download.docker.com/linux/ubuntu
+      {{ ansible_facts["distribution_release"] }} stable
+    state: present
+    filename: docker
+
+- name: Install containerd
+  apt:
+    name: containerd.io
+    state: present
+    update_cache: true
+
+- name: Create containerd config directory
+  file:
+    path: /etc/containerd
+    state: directory
+    mode: '0755'
+
+- name: Remove default containerd config if it disables CRI
+  file:
+    path: /etc/containerd/config.toml
+    state: absent
+
+- name: Write containerd config with SystemdCgroup enabled
+  copy:
+    dest: /etc/containerd/config.toml
+    mode: '0644'
+    content: |
+      version = 2
+
+      [plugins]
+        [plugins."io.containerd.grpc.v1.cri"]
+          [plugins."io.containerd.grpc.v1.cri".containerd]
+            [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+              [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                runtime_type = "io.containerd.runc.v2"
+                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                  SystemdCgroup = true
+
+- name: Enable and restart containerd
+  systemd:
+    name: containerd
+    enabled: true
+    state: restarted
+    daemon_reload: true
+
+- name: Wait for containerd socket to be ready
+  wait_for:
+    path: /var/run/containerd/containerd.sock
+    state: present
+    timeout: 30
